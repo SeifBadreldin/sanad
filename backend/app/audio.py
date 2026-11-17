@@ -17,12 +17,33 @@ class InvalidAudio(ValueError):
     pass
 
 
+class Busy(RuntimeError):
+    """Too many audio jobs are already running."""
+
+
+# Audio analysis is CPU heavy: cap how many run at once so a burst of uploads
+# cannot starve the server.
+_voice_slots = threading.BoundedSemaphore(int(os.getenv("VOICE_CONCURRENCY", "2")))
+
+
 def _load(data: bytes) -> tuple[np.ndarray, int]:
     try:
-        samples, rate = sf.read(io.BytesIO(data), dtype="float32", always_2d=True)
+        info = sf.info(io.BytesIO(data))
+        if info.format != "WAV":
+            raise InvalidAudio("Only WAV recordings are supported.")
+        if not 8000 <= info.samplerate <= 96000 or not 1 <= info.channels <= 8:
+            raise InvalidAudio("Unsupported WAV format. Use 8-96 kHz audio with up to 8 channels.")
+        # Read only what is analysed, whatever the header claims.
+        samples, rate = sf.read(
+            io.BytesIO(data), frames=info.samplerate * MAX_SECONDS, dtype="float32", always_2d=True
+        )
+    except InvalidAudio:
+        raise
     except Exception as exc:  # soundfile raises several unrelated types
         raise InvalidAudio("The file is not a readable WAV recording.") from exc
-    mono = samples.mean(axis=1)[: rate * MAX_SECONDS]
+    mono = samples.mean(axis=1)
+    if not np.isfinite(mono).all():
+        raise InvalidAudio("The file is not a readable WAV recording.")
     if len(mono) < rate:
         raise InvalidAudio("The recording is too short. Upload at least 1 second of audio.")
     return mono, rate
@@ -68,10 +89,17 @@ def speech_to_text_ready() -> bool:
     return _whisper is not None
 
 
+def warm_up() -> None:
+    with _whisper_lock:
+        _get_whisper()
+
+
 def scam_call_response(data: bytes) -> dict:
     mono, rate = _load(data)
     audio = _resample(mono, rate, 16000)
-    with _whisper_lock:
+    if not _whisper_lock.acquire(timeout=45):
+        raise Busy
+    try:
         model = _get_whisper()
         if model is None:
             return {
@@ -83,6 +111,8 @@ def scam_call_response(data: bytes) -> dict:
             }
         segments, info = model.transcribe(audio, beam_size=2, vad_filter=True, condition_on_previous_text=False)
         transcript = " ".join(s.text.strip() for s in segments).strip()
+    finally:
+        _whisper_lock.release()
 
     if len(transcript) < 8:
         return {
@@ -146,6 +176,15 @@ def voice_features(x: np.ndarray, rate: int) -> dict:
 
 
 def voice_response(data: bytes) -> dict:
+    if not _voice_slots.acquire(timeout=20):
+        raise Busy
+    try:
+        return _voice_response(data)
+    finally:
+        _voice_slots.release()
+
+
+def _voice_response(data: bytes) -> dict:
     x, rate = _load(data)
     if np.abs(x).max() < 1e-4:
         raise InvalidAudio("The recording is silent.")

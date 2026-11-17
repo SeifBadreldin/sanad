@@ -1,7 +1,9 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.20
-numpy>=1.26,<3
-soundfile==0.13.1
-faster-whisper==1.1.1
-requests>=2.31
+# Direct dependencies, pinned. Dependabot proposes updates; CI audits them.
+fastapi==0.163.2
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.34
+numpy==2.5.5
+soundfile==0.14.0
+faster-whisper==1.2.1
+requests==2.34.2

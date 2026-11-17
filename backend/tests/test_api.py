@@ -95,3 +95,66 @@ def test_voice_endpoint_returns_result():
 def test_short_audio_rejected():
     r = client.post("/detect-voice", files={"file": ("a.wav", wav(np.zeros(2000)), "audio/wav")})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------- security
+SITE = "https://sanad-web-beryl.vercel.app"
+
+
+def test_cors_allows_only_the_site():
+    ok = client.post("/detect-sms", json={"text": "hi"}, headers={"Origin": SITE})
+    assert ok.headers.get("access-control-allow-origin") == SITE
+    bad = client.post("/detect-sms", json={"text": "hi"}, headers={"Origin": "https://evil.example"})
+    assert "access-control-allow-origin" not in bad.headers
+    pre = client.options("/detect-sms", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"})
+    assert pre.status_code == 400
+
+
+def test_security_headers():
+    r = client.post("/detect-sms", json={"text": "hi"})
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+    assert "default-src 'none'" in r.headers["content-security-policy"]
+    assert r.headers["cache-control"] == "no-store"
+    assert "server" not in r.headers
+
+
+def test_unknown_fields_rejected():
+    r = client.post("/detect-sms", json={"text": "hi", "admin": True})
+    assert r.status_code == 422
+
+
+def test_oversized_json_body_rejected():
+    r = client.post("/detect-sms", content=b'{"text":"' + b"a" * 70000 + b'"}', headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_text_too_long_rejected():
+    assert client.post("/detect-sms", json={"text": "a" * 5001}).status_code == 422
+
+
+def test_rate_limit():
+    from app.security import RateLimiter
+
+    limiter = RateLimiter(None, per_minute=3, audio_per_minute=1, audio_paths=set())
+    assert [limiter._allow(("1.1.1.1", False), 3) for _ in range(4)][-1] > 0
+    assert limiter._allow(("2.2.2.2", False), 3) == 0  # other visitors unaffected
+
+
+def test_spoofed_ip_header_ignored_outside_proxy():
+    from app.main import client_ip
+
+    scope = {"client": ("203.0.113.9", 1234), "headers": [(b"x-real-ip", b"1.2.3.4")]}
+    assert client_ip(scope) == "203.0.113.9"
+    scope["client"] = ("100.64.0.2", 1234)  # Railway proxy
+    assert client_ip(scope) == "1.2.3.4"
+
+
+def test_bad_sample_rate_rejected():
+    r = client.post("/detect-voice", files={"file": ("a.wav", wav(np.zeros(4000), rate=4000), "audio/wav")})
+    assert r.status_code == 422
+
+
+def test_errors_are_json_without_internals():
+    r = client.get("/does-not-exist")
+    assert r.status_code == 404 and r.json() == {"detail": "Not Found"}
