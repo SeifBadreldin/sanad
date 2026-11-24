@@ -1,5 +1,5 @@
 # Direct dependencies, pinned. Dependabot proposes updates; CI audits them.
-fastapi==0.163.2
+fastapi==0.165.0
 starlette==1.10.0
 uvicorn[standard]==0.54.0
 python-multipart==0.0.34
